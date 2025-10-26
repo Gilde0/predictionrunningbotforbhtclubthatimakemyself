@@ -6,8 +6,8 @@ require("dotenv").config();
 
 // === CONFIG ===
 const ADMINS = [
-  { id: "123456789", channel: "-100111222333" }, // Replace with real admin & channel IDs
-  { id: "987654321", channel: "-100444555666" },
+  { id: process.env.ADMIN1_ID, channel: process.env.CHANNEL1_ID },
+  { id: process.env.ADMIN2_ID, channel: process.env.CHANNEL2_ID },
 ];
 
 const WORKERS = {
@@ -19,15 +19,14 @@ const WORKERS = {
 
 const WIN_OPTIONS = [3, 5, 10]; // winning limits
 const ISSUE_DELAY = 3; // wait for 3 issues before first forecast
-const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes idle timeout
 
-const PORT = process.env.PORT || 3000;
-const HOST_URL = "https://yourdomain.com"; // Replace with your hosted URL
+// === TELEGRAM BOT (WEBHOOK) ===
 const bot = new TelegramBot(process.env.BOT_TOKEN);
+const app = express();
+app.use(bodyParser.json());
 
 // === STATE PER ADMIN ===
 let sessions = {}; // key: adminId
-let idleTimers = {}; // key: adminId
 
 // === HELPERS ===
 const getSize = (num) => (num >= 5 ? "BIG" : "SMALL");
@@ -43,17 +42,24 @@ const calculateNextIssue = (issue) => {
 
 async function fetchResults(url) {
   try {
-    const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const res = await axios.get(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
     if (!res.data || !res.data.sample) return [];
     const sample = res.data.sample;
-    return [{ issue: sample.issueNumber, number: parseInt(sample.number, 10) }];
+    return [
+      {
+        issue: sample.issueNumber,
+        number: parseInt(sample.number, 10),
+      },
+    ];
   } catch (err) {
     console.error("❌ Fetch error:", err.message);
     return [];
   }
 }
 
-// === FORECAST LOGIC ===
+// === FORECAST LOGIC PER ADMIN ===
 async function checkAndPredict(adminId) {
   const session = sessions[adminId];
   if (!session || !session.selectedInterval) return;
@@ -64,6 +70,7 @@ async function checkAndPredict(adminId) {
 
   const latest = data[0];
   if (!latest.issue || latest.issue === session.lastIssue) return;
+
   session.lastIssue = latest.issue;
 
   if (!session.startIssue) session.startIssue = latest.issue;
@@ -75,6 +82,7 @@ async function checkAndPredict(adminId) {
 
   if (!session.lastPrediction) {
     session.lastPrediction = { size: nextSize, issue: nextIssue };
+
     const forecastMsg = `
 🎯 NEXT PREDICTION ON WINGO ${session.selectedInterval.toUpperCase()}
 ISSUE: ${nextIssue}
@@ -82,6 +90,7 @@ SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS
 🏆 Wins: ${session.winCount} / ${session.winLimit}
     `.trim();
+
     await bot.sendMessage(channelId, forecastMsg);
 
     const adminMsg = `
@@ -89,26 +98,35 @@ AMOUNT: ${session.currentAmount}RS
 🏆 Wins: ${session.winCount} / ${session.winLimit}
 Next prediction ready: ISSUE ${nextIssue} SIZE ${nextSize} AMOUNT ${session.currentAmount}RS
     `.trim();
-    const msg = await bot.sendMessage(adminId, adminMsg);
+
+    const msg = await bot.sendMessage(adminId, adminMsg, mainMenuKeyboard());
     session.adminMessageId = msg.message_id;
     return;
   }
 
   const actualSize = getSize(latest.number);
   const correct = actualSize === session.lastPrediction.size;
-  if (correct) session.currentAmount = 1, session.winCount += 1;
-  else session.currentAmount *= 3;
+
+  if (correct) {
+    session.currentAmount = 1;
+    session.winCount += 1;
+  } else {
+    session.currentAmount *= 3;
+  }
 
   let channelMsg = `${correct ? `✅ WIN! (${session.lastPrediction.size} for issue ${latest.issue})` : "AGAIN 3X!!!"}
 🏆 Wins: ${session.winCount} / ${session.winLimit}`;
+
   if (session.winCount < session.winLimit) {
     channelMsg += `
+
 🎯 NEXT PREDICTION ON WINGO ${session.selectedInterval.toUpperCase()}
 ISSUE: ${nextIssue}
 SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS`;
   }
-  await bot.sendMessage(channelId, channelMsg.trim());
+
+  await bot.sendMessage(channelId, channelMsg);
 
   const adminMsg = `
 ${correct ? "✅ WIN!" : "AGAIN 3X!!!"} (${session.lastPrediction.size} for issue ${latest.issue})
@@ -121,61 +139,97 @@ SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS
   `.trim();
 
-  await bot.editMessageText(adminMsg, { chat_id: adminId, message_id: session.adminMessageId });
+  await bot.sendMessage(adminId, adminMsg, mainMenuKeyboard());
+
   if (correct) session.winHistory.push(latest.issue);
   session.lastPrediction = { size: nextSize, issue: nextIssue };
 
-  if (session.winCount >= session.winLimit) stopSession(adminId);
+  if (session.winCount >= session.winLimit) {
+    await bot.sendMessage(
+      channelId,
+      `
+✅ Our prediction session has come to an end!
+Thanks for joining, everyone. 🙌
+Have great day and see you on the next session!
+
+📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
+
+and predict with us in real time! 🎯
+      `.trim()
+    );
+
+    clearInterval(session.autoInterval);
+    sessions[adminId] = null;
+    await bot.sendMessage(adminId, "Session ended! Choose an action:", mainMenuKeyboard());
+  }
 }
 
-// === KEYBOARDS ===
-const mainKeyboard = {
-  reply_markup: { keyboard: [["Start", "Stop"]], resize_keyboard: true, one_time_keyboard: false },
-};
-const intervalKeyboard = {
-  reply_markup: { keyboard: [["30s", "1m"], ["3m", "5m"], ["⬅️ Back"]], resize_keyboard: true, one_time_keyboard: false },
-};
-const winLimitKeyboard = {
-  reply_markup: { keyboard: [["3 Wins", "5 Wins", "10 Wins"], ["⬅️ Back"]], resize_keyboard: true, one_time_keyboard: false },
-};
+// === REPLY KEYBOARDS ===
+function mainMenuKeyboard() {
+  return {
+    reply_markup: {
+      keyboard: [["Start"], ["Stop"]],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
+  };
+}
 
-// === BOT SETUP ===
-bot.setWebHook(`${HOST_URL}/bot${process.env.BOT_TOKEN}`);
+function intervalKeyboard() {
+  return {
+    reply_markup: {
+      keyboard: [["30s", "1m"], ["3m", "5m"], ["Back"]],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
+  };
+}
 
-// === EXPRESS SETUP ===
-const app = express();
-app.use(bodyParser.json());
+function winLimitKeyboard() {
+  return {
+    reply_markup: {
+      keyboard: WIN_OPTIONS.map((n) => [n + " Wins"]).concat([["Back"]]),
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
+  };
+}
 
-app.post(`/bot${process.env.BOT_TOKEN}`, async (req, res) => {
-  const update = req.body;
-  const chatId = update.message?.chat?.id;
-  const text = update.message?.text;
-  if (!chatId || !text) return res.sendStatus(200);
-  if (!ADMINS.find((a) => a.id.toString() === chatId)) return res.sendStatus(403);
+// === HANDLE MESSAGES ===
+bot.on("message", async (msg) => {
+  const adminId = msg.chat.id.toString();
+  const text = msg.text;
 
-  if (!sessions[chatId]) sessions[chatId] = {};
-  const session = sessions[chatId];
+  if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
 
-  resetIdleTimer(chatId); // reset 5-min timer on any command
+  if (!sessions[adminId]) sessions[adminId] = {};
 
-  // Start / Stop
-  if (text === "Start" || text === "/start") {
-    await bot.sendMessage(chatId, "Welcome! Choose an action:", mainKeyboard);
-  } else if (text === "Stop" || text === "/stop") {
-    stopSession(chatId);
+  const session = sessions[adminId];
+
+  if (text === "/start" || text === "Start") {
+    await bot.sendMessage(adminId, "Welcome! Choose interval:", intervalKeyboard());
+    return;
+  }
+
+  if (text === "Stop") {
+    if (session && session.autoInterval) clearInterval(session.autoInterval);
+    sessions[adminId] = {};
+    await bot.sendMessage(adminId, "⏹ Forecasting stopped.", mainMenuKeyboard());
+    return;
   }
 
   // Interval selection
   if (["30s", "1m", "3m", "5m"].includes(text)) {
     session.selectedInterval = text;
-    const adminObj = ADMINS.find(a => a.id.toString() === chatId);
+    const adminObj = ADMINS.find((a) => a.id.toString() === adminId);
     session.channel = adminObj.channel;
-    await bot.sendMessage(chatId, `Interval selected: ${text}\nChoose winning limit:`, winLimitKeyboard);
+    await bot.sendMessage(adminId, `Interval selected: ${text}\nChoose win limit:`, winLimitKeyboard());
+    return;
   }
 
   // Win limit selection
-  if (["3 Wins", "5 Wins", "10 Wins"].includes(text)) {
-    const winLimit = parseInt(text);
+  if (WIN_OPTIONS.map((n) => n + " Wins").includes(text)) {
+    const winLimit = parseInt(text.split(" ")[0]);
     session.winLimit = winLimit;
     session.winCount = 0;
     session.currentAmount = 1;
@@ -186,34 +240,34 @@ app.post(`/bot${process.env.BOT_TOKEN}`, async (req, res) => {
 
     await bot.sendMessage(
       session.channel,
-      `🚨 Wingo Prediction Session Is Starting soon! 🎯\nGet ready for Wingo ${session.selectedInterval} predictions! 💥\n📲 Register here 👉 https://tinyurl.com/bhtclubs`
+      `
+🚨 Wingo Prediction Session Is Starting soon! 🎯
+Get ready, everyone — we’re kicking off our next round of Wingo ${session.selectedInterval} predictions! 💥
+Join in and let’s aim for another winning streak together. 💪
+📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
+and predict with us live! 🔥
+      `.trim()
     );
 
-    session.autoInterval = setInterval(() => checkAndPredict(chatId), 2000);
-    const msg = await bot.sendMessage(chatId, `✅ Forecast session started!\nInterval: ${session.selectedInterval.toUpperCase()}\nWin Limit: ${session.winLimit}`, mainKeyboard);
-    session.adminMessageId = msg.message_id;
+    // Start interval polling
+    session.autoInterval = setInterval(() => checkAndPredict(adminId), 2000);
+    await bot.sendMessage(adminId, `✅ Forecast session started!`, mainMenuKeyboard());
+    return;
   }
 
+  // Back button
+  if (text === "Back") {
+    await bot.sendMessage(adminId, "Main menu:", mainMenuKeyboard());
+    return;
+  }
+});
+
+// === EXPRESS WEBHOOK ===
+app.post(`/webhook/${process.env.BOT_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-// === SESSION STOP FUNCTION ===
-function stopSession(adminId) {
-  const session = sessions[adminId];
-  if (session && session.autoInterval) clearInterval(session.autoInterval);
-  sessions[adminId] = {};
-  bot.sendMessage(adminId, "⏹ Forecasting stopped.", mainKeyboard);
-
-  resetIdleTimer(adminId); // start idle timer to show main keyboard again
-}
-
-// === IDLE TIMER ===
-function resetIdleTimer(adminId) {
-  if (idleTimers[adminId]) clearTimeout(idleTimers[adminId]);
-  idleTimers[adminId] = setTimeout(() => {
-    sessions[adminId] = {};
-    bot.sendMessage(adminId, "⏹ Idle timeout. Showing main menu.", mainKeyboard);
-  }, IDLE_TIMEOUT);
-}
-
-app.listen(PORT, () => console.log(`🤖 Telegram bot webhook running on port ${PORT}`));
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🤖 Telegram Forecast Bot running on webhook and reply keyboard!");
+});
