@@ -1,5 +1,4 @@
 const express = require("express");
-const bodyParser = require("body-parser");
 const axios = require("axios");
 const TelegramBot = require("node-telegram-bot-api");
 require("dotenv").config();
@@ -20,11 +19,6 @@ const WORKERS = {
 const WIN_OPTIONS = [3, 5, 10]; // winning limits
 const ISSUE_DELAY = 3; // wait for 3 issues before first forecast
 
-// === TELEGRAM BOT (WEBHOOK) ===
-const bot = new TelegramBot(process.env.BOT_TOKEN);
-const app = express();
-app.use(bodyParser.json());
-
 // === STATE PER ADMIN ===
 let sessions = {}; // key: adminId
 
@@ -40,11 +34,50 @@ const calculateNextIssue = (issue) => {
   }
 };
 
+// === BOT MENUS ===
+const mainMenuKeyboard = () => ({
+  reply_markup: {
+    keyboard: [["Start"], ["Stop"]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  },
+});
+
+const intervalMenuKeyboard = () => ({
+  reply_markup: {
+    keyboard: [["30s", "1m"], ["3m", "5m"], ["Back"]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  },
+});
+
+const winLimitMenuKeyboard = () => ({
+  reply_markup: {
+    keyboard: [
+      WIN_OPTIONS.map((n) => n + " Wins"),
+      ["Back"],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  },
+});
+
+// === TELEGRAM BOT WITH WEBHOOK ===
+const bot = new TelegramBot(process.env.BOT_TOKEN, { webHook: true });
+bot.setWebHook(`${process.env.WEBHOOK_URL}/bot${process.env.BOT_TOKEN}`);
+
+// === EXPRESS SERVER FOR WEBHOOK ===
+const app = express();
+app.use(express.json());
+app.post(`/bot${process.env.BOT_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// === FETCH RESULTS ===
 async function fetchResults(url) {
   try {
-    const res = await axios.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
+    const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!res.data || !res.data.sample) return [];
     const sample = res.data.sample;
     return [
@@ -99,7 +132,7 @@ AMOUNT: ${session.currentAmount}RS
 Next prediction ready: ISSUE ${nextIssue} SIZE ${nextSize} AMOUNT ${session.currentAmount}RS
     `.trim();
 
-    const msg = await bot.sendMessage(adminId, adminMsg, mainMenuKeyboard());
+    const msg = await bot.sendMessage(adminId, adminMsg);
     session.adminMessageId = msg.message_id;
     return;
   }
@@ -126,7 +159,7 @@ SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS`;
   }
 
-  await bot.sendMessage(channelId, channelMsg);
+  await bot.sendMessage(channelId, channelMsg.trim());
 
   const adminMsg = `
 ${correct ? "✅ WIN!" : "AGAIN 3X!!!"} (${session.lastPrediction.size} for issue ${latest.issue})
@@ -139,7 +172,10 @@ SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS
   `.trim();
 
-  await bot.sendMessage(adminId, adminMsg, mainMenuKeyboard());
+  await bot.editMessageText(adminMsg, {
+    chat_id: adminId,
+    message_id: session.adminMessageId,
+  });
 
   if (correct) session.winHistory.push(latest.issue);
   session.lastPrediction = { size: nextSize, issue: nextIssue };
@@ -155,81 +191,49 @@ Have great day and see you on the next session!
 📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
 
 and predict with us in real time! 🎯
-      `.trim()
+    `.trim(),
     );
 
     clearInterval(session.autoInterval);
     sessions[adminId] = null;
-    await bot.sendMessage(adminId, "Session ended! Choose an action:", mainMenuKeyboard());
+
+    await bot.sendMessage(adminId, "Session ended!", mainMenuKeyboard());
   }
 }
 
-// === REPLY KEYBOARDS ===
-function mainMenuKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [["Start"], ["Stop"]],
-      resize_keyboard: true,
-      one_time_keyboard: false,
-    },
-  };
-}
-
-function intervalKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [["30s", "1m"], ["3m", "5m"], ["Back"]],
-      resize_keyboard: true,
-      one_time_keyboard: false,
-    },
-  };
-}
-
-function winLimitKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: WIN_OPTIONS.map((n) => [n + " Wins"]).concat([["Back"]]),
-      resize_keyboard: true,
-      one_time_keyboard: false,
-    },
-  };
-}
-
-// === HANDLE MESSAGES ===
+// === HANDLE MESSAGES FOR START/STOP AND MENU ===
 bot.on("message", async (msg) => {
   const adminId = msg.chat.id.toString();
-  const text = msg.text;
-
   if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
 
-  if (!sessions[adminId]) sessions[adminId] = {};
+  const text = msg.text.trim().toLowerCase();
 
-  const session = sessions[adminId];
-
-  if (text === "/start" || text === "Start") {
-    await bot.sendMessage(adminId, "Welcome! Choose interval:", intervalKeyboard());
+  if (text === "/start" || text === "start") {
+    await bot.sendMessage(adminId, "Welcome! Choose an action:", mainMenuKeyboard());
     return;
   }
 
-  if (text === "Stop") {
+  if (text === "/stop" || text === "stop") {
+    const session = sessions[adminId];
     if (session && session.autoInterval) clearInterval(session.autoInterval);
-    sessions[adminId] = {};
+    sessions[adminId] = null;
     await bot.sendMessage(adminId, "⏹ Forecasting stopped.", mainMenuKeyboard());
     return;
   }
 
-  // Interval selection
-  if (["30s", "1m", "3m", "5m"].includes(text)) {
-    session.selectedInterval = text;
+  // Handle menu buttons
+  if (text === "30s" || text === "1m" || text === "3m" || text === "5m") {
+    if (!sessions[adminId]) sessions[adminId] = {};
+    sessions[adminId].selectedInterval = text;
     const adminObj = ADMINS.find((a) => a.id.toString() === adminId);
-    session.channel = adminObj.channel;
-    await bot.sendMessage(adminId, `Interval selected: ${text}\nChoose win limit:`, winLimitKeyboard());
+    sessions[adminId].channel = adminObj.channel;
+    await bot.sendMessage(adminId, `Interval selected: ${text.toUpperCase()}\nChoose winning limit:`, winLimitMenuKeyboard());
     return;
   }
 
-  // Win limit selection
-  if (WIN_OPTIONS.map((n) => n + " Wins").includes(text)) {
+  if (WIN_OPTIONS.map((n) => n + " wins").includes(text)) {
     const winLimit = parseInt(text.split(" ")[0]);
+    const session = sessions[adminId];
     session.winLimit = winLimit;
     session.winCount = 0;
     session.currentAmount = 1;
@@ -246,28 +250,27 @@ Get ready, everyone — we’re kicking off our next round of Wingo ${session.se
 Join in and let’s aim for another winning streak together. 💪
 📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
 and predict with us live! 🔥
-      `.trim()
+    `.trim(),
     );
 
-    // Start interval polling
     session.autoInterval = setInterval(() => checkAndPredict(adminId), 2000);
-    await bot.sendMessage(adminId, `✅ Forecast session started!`, mainMenuKeyboard());
+
+    const msg = await bot.sendMessage(
+      adminId,
+      `✅ Forecast session started!\nInterval: ${session.selectedInterval.toUpperCase()}\nWin Limit: ${session.winLimit}`,
+      mainMenuKeyboard(),
+    );
+    session.adminMessageId = msg.message_id;
     return;
   }
 
-  // Back button
-  if (text === "Back") {
-    await bot.sendMessage(adminId, "Main menu:", mainMenuKeyboard());
-    return;
+  if (text === "back") {
+    await bot.sendMessage(adminId, "Select interval:", intervalMenuKeyboard());
   }
 });
 
-// === EXPRESS WEBHOOK ===
-app.post(`/webhook/${process.env.BOT_TOKEN}`, (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🤖 Telegram Forecast Bot running on webhook and reply keyboard!");
+// === EXPRESS SERVER LISTEN ===
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🤖 Telegram Forecast Bot running with webhook on port ${PORT}`);
 });
