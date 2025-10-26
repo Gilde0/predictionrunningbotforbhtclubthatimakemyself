@@ -1,0 +1,32 @@
+# Telegram Bot Template
+
+Each user must:
+- Use their **own Telegram bot token** from @BotFather  
+- Replace all IDs and URLs with their own  
+- Never share `.env` publicly  
+
+Example:
+```env
+BOT_TOKEN=123456:ABCDEF-your-own-bot-token
+ADMIN1_ID=987654321
+CHANNEL1_ID=-100987654321
+
+
+
+---
+
+### 🔒 Summary
+| What’s Safe | What’s Risky |
+|--------------|--------------|
+| Giving the **code** | Sharing your **real `.env`** |
+| Friends changing their own IDs and tokens | Using your bot token or channel IDs |
+| Each person running their own Replit | Sharing one account for multiple bots |
+| Using `.env.example` template | Pasting real tokens online (GitHub, chats, etc.) |
+
+---
+
+If you’d like, I can help you:
+- Generate a **clean `.env.example` + README.md + LICENSE`** pack ready for upload,  
+- Or add support in your code to **auto-detect missing `.env` values** and guide users interactively.  
+
+Would you like me to make that clean starter pack for you?
