@@ -174,9 +174,12 @@ const mainMenu = {
 const startMenuInline = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: "Start Forecast Session", callback_data: "start_menu" }]
-    ]
-  }
+      [
+        { text: "Start Forecast", callback_data: "start_menu" },
+        { text: "Stop Forecast", callback_data: "stop" },
+      ],
+    ],
+  },
 };
 
 // === Interval selection inline menu ===
@@ -229,14 +232,10 @@ app.listen(PORT, () => console.log(`🚀 Express server running on port ${PORT}`
 // === COMMANDS HANDLER ===
 bot.onText(/\/start/, (msg) => {
   const adminId = msg.chat.id.toString();
-  if (!ADMINS.find(a => a.id.toString() === adminId)) return;
+  if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
 
-  // Step 1: show big keyboard
-  bot.sendMessage(adminId, "Welcome! Choose an action:", mainMenu)
-    .then(() => {
-      // Step 2: send welcome message with inline button
-      bot.sendMessage(adminId, "Click below to start your forecast session:", startMenuInline);
-    });
+  // Send welcome message with inline buttons
+  bot.sendMessage(adminId, "Welcome! Choose an action:", startMenuInline);
 });
 
 bot.onText(/\/stop/, (msg) => {
