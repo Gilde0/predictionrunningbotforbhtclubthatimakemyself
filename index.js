@@ -17,11 +17,13 @@ const WORKERS = {
 
 const WIN_OPTIONS = [3, 5, 10]; // winning limits
 const ISSUE_DELAY = 3; // wait for 3 issues before first forecast
+const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes idle
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 // === STATE PER ADMIN ===
 let sessions = {}; // key: adminId
+let idleTimers = {}; // key: adminId
 
 // === HELPERS ===
 const getSize = (num) => (num >= 5 ? "BIG" : "SMALL");
@@ -34,6 +36,17 @@ const calculateNextIssue = (issue) => {
     return issue;
   }
 };
+
+// Reset idle timer
+function resetIdle(adminId) {
+  if (idleTimers[adminId]) clearTimeout(idleTimers[adminId]);
+  idleTimers[adminId] = setTimeout(() => {
+    const session = sessions[adminId];
+    if (session && session.autoInterval) clearInterval(session.autoInterval);
+    sessions[adminId] = null;
+    bot.sendMessage(adminId, "⏹ Session auto-stopped due to inactivity.", mainMenu);
+  }, IDLE_TIMEOUT);
+}
 
 // === FETCH RESULTS ===
 async function fetchResults(url) {
@@ -69,7 +82,6 @@ async function checkAndPredict(adminId) {
 
   session.lastIssue = latest.issue;
 
-  // Wait until ISSUE_DELAY is passed
   if (!session.startIssue) session.startIssue = latest.issue;
   const diff = BigInt(latest.issue) - BigInt(session.startIssue);
   if (diff < ISSUE_DELAY) return;
@@ -80,25 +92,22 @@ async function checkAndPredict(adminId) {
   // First prediction
   if (!session.lastPrediction) {
     session.lastPrediction = { size: nextSize, issue: nextIssue };
-    // Send forecast to channel
+
     const forecastMsg = `
 🎯 NEXT PREDICTION ON WINGO ${session.selectedInterval.toUpperCase()}
 ISSUE: ${nextIssue}
 SIZE: ${nextSize}
 AMOUNT: ${session.currentAmount}RS
-🏆 Wins: ${session.winCount} / ${session.winLimit}
-    `.trim();
+🏆 Wins: ${session.winCount} / ${session.winLimit}`.trim();
 
     await bot.sendMessage(channelId, forecastMsg);
 
-    // Send admin private message
     const adminMsg = `
 ✅ Forecast session started!
 🏆 Wins: ${session.winCount} / ${session.winLimit}
-Next prediction ready: ISSUE ${nextIssue} SIZE ${nextSize} AMOUNT ${session.currentAmount}RS
-    `.trim();
+Next prediction ready: ISSUE ${nextIssue} SIZE ${nextSize} AMOUNT ${session.currentAmount}RS`.trim();
 
-    const msg = await bot.sendMessage(adminId, adminMsg);
+    const msg = await bot.sendMessage(adminId, adminMsg, backStopMenu);
     session.adminMessageId = msg.message_id;
     return;
   }
@@ -113,64 +122,49 @@ Next prediction ready: ISSUE ${nextIssue} SIZE ${nextSize} AMOUNT ${session.curr
     session.currentAmount *= 3;
   }
 
-  // === Broadcast to channel (cleaner format) ===
   let channelMsg = `${correct ? `✅ WIN! (${session.lastPrediction.size} for issue ${latest.issue})` : "AGAIN 3X!!!"}
-  🏆 Wins: ${session.winCount} / ${session.winLimit}`;
+🏆 Wins: ${session.winCount} / ${session.winLimit}`;
 
   if (session.winCount < session.winLimit) {
     channelMsg += `
-
-  🎯 NEXT PREDICTION ON WINGO ${session.selectedInterval.toUpperCase()}
-    ISSUE: ${nextIssue}
-    SIZE: ${nextSize}
-    AMOUNT: ${session.currentAmount}RS`;
+🎯 NEXT PREDICTION ON WINGO ${session.selectedInterval.toUpperCase()}
+ISSUE: ${nextIssue}
+SIZE: ${nextSize}
+AMOUNT: ${session.currentAmount}RS`;
   }
 
   await bot.sendMessage(channelId, channelMsg.trim());
 
-  // Admin private message (edited each time)
   const adminMsg = `
-  ${correct ? "✅ WIN!" : "AGAIN 3X!!!"} (${session.lastPrediction.size} for issue ${latest.issue})
-  🏆 Wins: ${session.winCount} / ${session.winLimit}
-  Winning Issue Numbers:
-  ${session.winHistory.join("\n")}
-  Next prediction:
-  🎯 ISSUE: ${nextIssue}
-  SIZE: ${nextSize}
-  AMOUNT: ${session.currentAmount}RS
-    `.trim();
+${correct ? "✅ WIN!" : "AGAIN 3X!!!"} (${session.lastPrediction.size} for issue ${latest.issue})
+🏆 Wins: ${session.winCount} / ${session.winLimit}
+Winning Issue Numbers:
+${session.winHistory.join("\n")}
+Next prediction:
+🎯 ISSUE: ${nextIssue}
+SIZE: ${nextSize}
+AMOUNT: ${session.currentAmount}RS`.trim();
 
   await bot.editMessageText(adminMsg, {
     chat_id: adminId,
     message_id: session.adminMessageId,
   });
 
-  // Save for next round
   if (correct) session.winHistory.push(latest.issue);
   session.lastPrediction = { size: nextSize, issue: nextIssue };
 
-  // Check win limit
   if (session.winCount >= session.winLimit) {
-    await bot.sendMessage(
-      channelId,
-      `
+    await bot.sendMessage(channelId, `
 ✅ Our prediction session has come to an end!
 Thanks for joining, everyone. 🙌
 Have great day and see you on the next session!
 
 📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
-
-and predict with us in real time! 🎯
-    `.trim(),
-    );
+and predict with us in real time! 🎯`.trim());
 
     clearInterval(session.autoInterval);
     sessions[adminId] = null;
-    await bot.sendMessage(
-      adminId,
-      "Session ended! Choose interval to start new session:",
-      intervalMenu,
-    );
+    bot.sendMessage(adminId, "Session ended! Choose interval to start new session:", intervalMenu);
   }
 }
 
@@ -198,9 +192,7 @@ const intervalMenu = {
 const winLimitMenu = {
   reply_markup: {
     inline_keyboard: [
-      ...WIN_OPTIONS.map((n) => [
-        { text: n + " Wins", callback_data: "win_" + n },
-      ]),
+      ...WIN_OPTIONS.map((n) => [{ text: n + " Wins", callback_data: "win_" + n }]),
       [{ text: "⬅️ Back", callback_data: "interval_back" }],
     ],
   },
@@ -217,19 +209,34 @@ const backStopMenu = {
   },
 };
 
-// === SHOW MENU TO ADMINS ON START ===
-ADMINS.forEach((a) =>
-  bot.sendMessage(a.id, "Welcome! Choose an action:", mainMenu),
-);
+// === COMMAND HANDLERS ===
+bot.onText(/\/start/, (msg) => {
+  const adminId = msg.chat.id.toString();
+  if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
+
+  resetIdle(adminId);
+  bot.sendMessage(adminId, "Welcome! Choose an action:", mainMenu);
+});
+
+bot.onText(/\/stop/, (msg) => {
+  const adminId = msg.chat.id.toString();
+  if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
+
+  resetIdle(adminId);
+  const session = sessions[adminId];
+  if (session && session.autoInterval) clearInterval(session.autoInterval);
+  sessions[adminId] = null;
+  bot.sendMessage(adminId, "⏹ Forecasting stopped.", mainMenu);
+});
 
 // === CALLBACK HANDLER ===
 bot.on("callback_query", async (query) => {
   const adminId = query.message.chat.id.toString();
   if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
 
+  resetIdle(adminId);
   const data = query.data;
 
-  // 🆕 Handle back button from win limit menu
   if (data === "interval_back") {
     await bot.editMessageText("Select interval:", {
       chat_id: adminId,
@@ -251,11 +258,11 @@ bot.on("callback_query", async (query) => {
   if (data === "start_menu" || data.startsWith("interval_")) {
     if (data.startsWith("interval_")) {
       const interval = data.split("_")[1];
-      // Save interval and ask for win limit
       if (!sessions[adminId]) sessions[adminId] = {};
       sessions[adminId].selectedInterval = interval;
       const adminObj = ADMINS.find((a) => a.id.toString() === adminId);
       sessions[adminId].channel = adminObj.channel;
+
       await bot.editMessageText(
         `Interval selected: ${interval.toUpperCase()}\nChoose winning limit:`,
         {
@@ -285,26 +292,15 @@ bot.on("callback_query", async (query) => {
     session.startIssue = null;
     session.winHistory = [];
 
-    // Send starting message to channel
-    await bot.sendMessage(
-      session.channel,
-      `
+    await bot.sendMessage(session.channel, `
 🚨 Wingo Prediction Session Is Starting soon! 🎯
 Get ready, everyone — we’re kicking off our next round of Wingo ${session.selectedInterval} predictions! 💥
 Join in and let’s aim for another winning streak together. 💪
 📲 Don’t forget to register here 👉 https://tinyurl.com/bhtclubs
-and predict with us live! 🔥
-    `.trim(),
-    );
+and predict with us live! 🔥`.trim());
 
-    // Start interval
     session.autoInterval = setInterval(() => checkAndPredict(adminId), 2000);
-
-    const msg = await bot.sendMessage(
-      adminId,
-      `✅ Forecast session started!\nInterval: ${session.selectedInterval.toUpperCase()}\nWin Limit: ${session.winLimit}`,
-      backStopMenu,
-    );
+    const msg = await bot.sendMessage(adminId, `✅ Forecast session started!\nInterval: ${session.selectedInterval.toUpperCase()}\nWin Limit: ${session.winLimit}`, backStopMenu);
     session.adminMessageId = msg.message_id;
     return;
   }
@@ -318,6 +314,4 @@ and predict with us live! 🔥
   }
 });
 
-console.log(
-  "🤖 Multi-admin Telegram Forecast Bot ready with 3-issue delay and admin updates!",
-);
+console.log("🤖 Multi-admin Telegram Forecast Bot ready with /start, /stop, menus, 3-issue delay, and 5-min idle auto-stop!");
