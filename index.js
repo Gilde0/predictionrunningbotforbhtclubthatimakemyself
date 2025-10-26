@@ -161,9 +161,25 @@ and predict with us in real time! 🎯
 }
 
 // === BOT MENUS ===
+// === Big keyboard (reply keyboard) ===
 const mainMenu = {
-  reply_markup: { keyboard: [["/start", "/stop"]], resize_keyboard: true, one_time_keyboard: false },
+  reply_markup: {
+    keyboard: [["/start", "/stop"]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  },
 };
+
+// === Inline button after /start ===
+const startMenuInline = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "Start Forecast Session", callback_data: "start_menu" }]
+    ]
+  }
+};
+
+// === Interval selection inline menu ===
 const intervalMenu = {
   reply_markup: {
     inline_keyboard: [
@@ -177,6 +193,8 @@ const intervalMenu = {
     ],
   },
 };
+
+// === Win limit selection inline menu ===
 const winLimitMenu = {
   reply_markup: {
     inline_keyboard: [
@@ -185,10 +203,15 @@ const winLimitMenu = {
     ],
   },
 };
+
+// === Stop / Back inline menu during session ===
 const backStopMenu = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: "⏹ Stop", callback_data: "stop" }, { text: "⬅️ Back", callback_data: "main" }],
+      [
+        { text: "⏹ Stop", callback_data: "stop" },
+        { text: "⬅️ Back", callback_data: "main" },
+      ],
     ],
   },
 };
@@ -206,8 +229,14 @@ app.listen(PORT, () => console.log(`🚀 Express server running on port ${PORT}`
 // === COMMANDS HANDLER ===
 bot.onText(/\/start/, (msg) => {
   const adminId = msg.chat.id.toString();
-  if (!ADMINS.find((a) => a.id.toString() === adminId)) return;
-  bot.sendMessage(adminId, "Welcome! Choose an action:", mainMenu);
+  if (!ADMINS.find(a => a.id.toString() === adminId)) return;
+
+  // Step 1: show big keyboard
+  bot.sendMessage(adminId, "Welcome! Choose an action:", mainMenu)
+    .then(() => {
+      // Step 2: send welcome message with inline button
+      bot.sendMessage(adminId, "Click below to start your forecast session:", startMenuInline);
+    });
 });
 
 bot.onText(/\/stop/, (msg) => {
